@@ -1,0 +1,11 @@
+[repository]
+name = "hyprtagger"
+authors = ["prankstr"]
+# One [hyprland_commit, plugin_commit] pair per supported Hyprland release.
+commit_pins = []
+
+[hyprtagger]
+description = "dwl/Mango-style tags for Hyprland: bar reporting and the tags window rule"
+authors = ["prankstr"]
+output = "hyprtagger.so"
+build = ["make all"]
