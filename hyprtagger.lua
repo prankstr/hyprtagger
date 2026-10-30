@@ -117,7 +117,9 @@ local function same(a, b)
 end
 
 local function is_tag_ws(ws)
-	return ws ~= nil and not ws.special and ws.id >= 1 and ws.id <= NTAGS
+	-- Since Hyprland 0.57, named workspaces have no numeric id (ws.id == nil)
+	local id = ws and ws.id
+	return type(id) == "number" and not ws.special and id >= 1 and id <= NTAGS
 end
 
 local function managed(w)

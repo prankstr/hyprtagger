@@ -32,10 +32,11 @@
 #include <lua.hpp>
 
 #include <hyprland/src/plugins/PluginAPI.hpp>
-#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/workspace/HLWorkspace.hpp>
+#include <hyprland/src/workspace/RegularWorkspace.hpp>
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/state/WorkspaceState.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleEffectContainer.hpp>
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
@@ -62,17 +63,28 @@ namespace {
     std::bitset<10> g_occupied;
     std::bitset<10> g_madePersistent; // workspaces we turned persistent (and must undo)
 
-    bool            isTag(const PHLWORKSPACE& ws) {
-        return ws && !ws->inert() && !ws->m_isSpecialWorkspace && ws->m_id >= 1 && ws->m_id <= NTAGS;
+    // Tag number (1..NTAGS) of a workspace, or 0 if it isn't a tag workspace.
+    // Since 0.57 workspace IDs are a variant: numbered, or none for named/special.
+    int tagOf(const PHLWORKSPACE& ws) {
+        if (!ws || ws->type() != Workspace::eWorkspaceType::NORMAL)
+            return 0;
+        const auto id = ws->numberedID();
+        if (!id || *id < 1 || *id > (Workspace::WorkspaceIDContainer)NTAGS)
+            return 0;
+        return (int)*id;
     }
 
-    PHLWORKSPACE findWorkspace(WORKSPACEID id) {
+    PHLWORKSPACE findWorkspace(int tag) {
         for (const auto& ref : State::workspaceState()->workspaces()) {
             auto ws = ref.lock();
-            if (ws && !ws->inert() && ws->m_id == id)
+            if (ws && tagOf(ws) == tag)
                 return ws;
         }
         return nullptr;
+    }
+
+    Workspace::CRegularWorkspace* regular(const PHLWORKSPACE& ws) {
+        return ws ? dynamic_cast<Workspace::CRegularWorkspace*>(ws.get()) : nullptr;
     }
 
     // Override the state Hyprland just sent for a tag workspace
@@ -80,11 +92,11 @@ namespace {
         if (!g_haveState || !res || !res->good() || !res->m_resource)
             return;
 
-        auto ws = res->m_workspace.lock();
-        if (!isTag(ws))
+        auto       ws = res->m_workspace.lock();
+        const auto t  = tagOf(ws);
+        if (!t)
             return;
 
-        const auto t     = ws->m_id;
         uint32_t   state = 0;
         if (g_view[t])
             state |= EXT_WORKSPACE_HANDLE_V1_STATE_ACTIVE;
@@ -105,8 +117,7 @@ namespace {
     bool hasLiveWorkspace(CExtWorkspaceResource* res) {
         if (!res || !res->good())
             return false;
-        auto ws = res->m_workspace.lock();
-        return ws && !ws->inert();
+        return !!res->m_workspace.lock();
     }
 
     void hkSendState(void* thisptr) {
@@ -128,10 +139,10 @@ namespace {
 
     // Keep viewed/occupied tag workspaces alive, let the rest go
     void syncPersistence() {
-        MONITORID mon = MONITOR_INVALID;
-        for (int t = 1; t <= NTAGS && mon == MONITOR_INVALID; ++t) {
+        PHLMONITOR mon;
+        for (int t = 1; t <= NTAGS && !mon; ++t) {
             if (auto ws = findWorkspace(t); ws && ws->m_monitor)
-                mon = ws->m_monitor->m_id;
+                mon = ws->m_monitor.lock();
         }
 
         for (int t = 1; t <= NTAGS; ++t) {
@@ -139,15 +150,18 @@ namespace {
             auto       ws   = findWorkspace(t);
 
             if (want) {
-                if (!ws && mon != MONITOR_INVALID)
-                    ws = State::workspaceState()->create(t, mon, std::to_string(t));
-                if (ws && !ws->isPersistent()) {
-                    ws->setPersistent(true);
+                if (!ws && mon) {
+                    ws = State::workspaceState()->createNumbered(Workspace::SWorkspaceNumberedID((Workspace::WorkspaceIDContainer)t), mon, std::to_string(t));
+                    if (ws)
+                        ws->ready();
+                }
+                if (auto r = regular(ws); r && !r->isPersistent()) {
+                    r->setPersistent(true);
                     g_madePersistent[t] = true;
                 }
             } else if (g_madePersistent[t]) {
-                if (ws)
-                    ws->setPersistent(false);
+                if (auto r = regular(ws))
+                    r->setPersistent(false);
                 g_madePersistent[t] = false;
             }
         }
