@@ -26,7 +26,7 @@
 
 #include <bitset>
 #include <format>
-#include <sstream>
+#include <stdexcept>
 #include <string>
 
 #include <lua.hpp>
@@ -43,7 +43,7 @@
 #include <hyprland/src/protocols/WaylandProtocol.hpp>
 #include <hyprland/protocols/ext-workspace-v1.hpp>
 
-// Needed for the protocol's private members (resource list, handle, workspace)
+// Needed for the protocol's private members (resource list, handle, manager, sendState)
 #define private public
 #include <hyprland/src/protocols/ExtWorkspace.hpp>
 #undef private
@@ -92,7 +92,7 @@ namespace {
         if (!g_haveState || !res || !res->good() || !res->m_resource)
             return;
 
-        auto       ws = res->m_workspace.lock();
+        auto       ws = res->workspace();
         const auto t  = tagOf(ws);
         if (!t)
             return;
@@ -117,7 +117,7 @@ namespace {
     bool hasLiveWorkspace(CExtWorkspaceResource* res) {
         if (!res || !res->good())
             return false;
-        return !!res->m_workspace.lock();
+        return !!res->workspace();
     }
 
     void hkSendState(void* thisptr) {
@@ -206,13 +206,20 @@ namespace {
         return 1;
     }
 
-    // hl.plugin.hyprtagger.clear(): drop overrides, return to plain Hyprland behaviour
-    int luaClear(lua_State* L) {
+    // Drop all overrides and hand plain Hyprland state back to clients. With
+    // g_haveState cleared, applyTagState() is a no-op, so the resend is safe
+    // whether or not the sendState hook is still installed.
+    void reset() {
         g_haveState = false;
         g_view.reset();
         g_occupied.reset();
         syncPersistence();
         resendAll();
+    }
+
+    // hl.plugin.hyprtagger.clear(): drop overrides, return to plain Hyprland behaviour
+    int luaClear(lua_State*) {
+        reset();
         return 0;
     }
 
@@ -239,6 +246,11 @@ namespace {
     void fail(const std::string& msg) {
         HyprlandAPI::addNotification(PHANDLE, "[hyprtagger] " + msg, CHyprColor{1.0, 0.2, 0.2, 1.0}, 8000);
         throw std::runtime_error("[hyprtagger] " + msg);
+    }
+
+    void addLuaFn(const char* name, PLUGIN_LUA_FN fn) {
+        if (!HyprlandAPI::addLuaFunction(PHANDLE, "hyprtagger", name, fn))
+            fail(std::format("could not register hl.plugin.hyprtagger.{}", name));
     }
 }
 
@@ -269,14 +281,16 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     if (!g_sendStateHook || !g_sendStateHook->hook())
         fail("failed to hook CExtWorkspaceResource::sendState");
 
-    HyprlandAPI::addLuaFunction(PHANDLE, "hyprtagger", "set_state", luaSetState);
-    HyprlandAPI::addLuaFunction(PHANDLE, "hyprtagger", "has_state", luaHasState);
-    HyprlandAPI::addLuaFunction(PHANDLE, "hyprtagger", "clear", luaClear);
+    addLuaFn("set_state", luaSetState);
+    addLuaFn("has_state", luaHasState);
+    addLuaFn("clear", luaClear);
+    addLuaFn("rule_tags", luaRuleTags);
 
+    // Register the effect last: a failed init ejects the plugin without calling
+    // PLUGIN_EXIT, so nothing that can throw may follow this.
     g_tagsEffect = Desktop::Rule::windowEffects()->registerEffect(TAGS_EFFECT);
     if (!g_tagsEffect)
         fail("could not register the `tags` window rule effect");
-    HyprlandAPI::addLuaFunction(PHANDLE, "hyprtagger", "rule_tags", luaRuleTags);
 
     return {"hyprtagger", "dwl/Mango-style tags for Hyprland: bar reporting and the tags window rule", "prankstr", "0.1"};
 }
@@ -284,10 +298,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 APICALL EXPORT void PLUGIN_EXIT() {
     if (g_tagsEffect)
         Desktop::Rule::windowEffects()->unregisterEffect(g_tagsEffect);
-    g_haveState = false;
-    g_view.reset();
-    g_occupied.reset();
-    syncPersistence();
-    // hooks are removed by Hyprland; resend plain state afterwards is not possible
-    // from here, but the next workspace change on each handle corrects it.
+    // Undo persistence and send plain state, so bars don't keep showing tags
+    reset();
 }

@@ -4,13 +4,16 @@ PKGS = pixman-1 libdrm hyprland pangocairo libinput libudev wayland-server xkbco
 
 all: hyprtagger.so
 
-# Build to a temp file and rename, so a running Hyprland that has the old
-# .so mapped is never handed a half-written file.
-hyprtagger.so: main.cpp
+# Always rebuild: packaged headers retain build-time mtimes, so timestamps
+# cannot reliably detect a Hyprland upgrade and prevent an API hash mismatch.
+# Build to a temporary file and rename to preserve any currently mapped .so.
+hyprtagger.so: FORCE
 	$(CXX) $(CXXFLAGS) main.cpp -o $@.tmp `pkg-config --cflags $(PKGS)`
 	mv -f $@.tmp $@
+
+FORCE:
 
 clean:
 	rm -f hyprtagger.so hyprtagger.so.tmp
 
-.PHONY: all clean
+.PHONY: all clean FORCE
